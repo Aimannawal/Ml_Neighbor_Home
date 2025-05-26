@@ -10,10 +10,9 @@ from tensorflow.keras import layers, models
 from tensorflow.keras.models import load_model
 import uvicorn
 
-# ==== STEP 1: Siapkan Dataset dari data.csv ====
+# ===== STEP 1: Siapkan Dataset dari data.csv =====
 df = pd.read_csv("data.csv")
 
-# Buat direktori dataset
 dataset_dir = "dataset"
 os.makedirs(dataset_dir, exist_ok=True)
 
@@ -31,7 +30,7 @@ for _, row in df.iterrows():
     else:
         print(f"Gambar tidak ditemukan: {src}")
 
-# ==== STEP 2: Melatih Model CNN ====
+# ===== STEP 2: Training CNN Model =====
 image_size = (128, 128)
 batch_size = 32
 
@@ -59,17 +58,17 @@ model.compile(optimizer='adam', loss='categorical_crossentropy', metrics=['accur
 model.fit(train_gen, epochs=10)
 model.save("model.h5")
 
-# ==== STEP 3: FastAPI Backend ====
+# ===== STEP 3: FastAPI Backend =====
 app = FastAPI()
 
-# Load model & data
 model = load_model("model.h5")
 df = pd.read_csv("data.csv")
 
-# Ambil mapping kelas
 class_names = sorted(os.listdir(dataset_dir))
 class_indices = {name: i for i, name in enumerate(class_names)}
 index_to_class = {v: k for k, v in class_indices.items()}
+
+CONFIDENCE_THRESHOLD = 0.8  # 80% minimal confidence
 
 @app.post("/predict")
 async def predict(image: UploadFile = File(...)):
@@ -79,27 +78,43 @@ async def predict(image: UploadFile = File(...)):
     with open(temp_path, "wb") as f:
         f.write(contents)
 
-    img = Image.open(temp_path).convert("RGB")
-    img = img.resize((128, 128))
-    img_array = np.array(img) / 255.0
-    img_array = np.expand_dims(img_array, axis=0)
+    try:
+        img = Image.open(temp_path).convert("RGB")
+        img = img.resize((128, 128))
+        img_array = np.array(img) / 255.0
+        img_array = np.expand_dims(img_array, axis=0)
 
-    preds = model.predict(img_array)
-    class_idx = np.argmax(preds[0])
-    predicted_label = index_to_class[class_idx]
+        preds = model.predict(img_array)
+        confidence = float(np.max(preds))
+        class_idx = int(np.argmax(preds[0]))
+        predicted_label = index_to_class[class_idx]
+    except Exception as e:
+        os.remove(temp_path)
+        return JSONResponse(content={"error": str(e)})
+
+    os.remove(temp_path)
+
+    if confidence < CONFIDENCE_THRESHOLD:
+        return JSONResponse(content={
+            "prediction": "Rumah tidak dikenal",
+            "confidence": confidence
+        })
 
     match = df[df['name'].str.lower() == predicted_label.lower()]
     if not match.empty:
         nama = match.iloc[0]['name']
-        result = f"Ini rumah {nama}"
         url = f"http://127.0.0.1:8000/{nama.lower()}"
+        return JSONResponse(content={
+            "prediction": f"Ini rumah {nama}",
+            "confidence": confidence,
+            "url": url
+        })
     else:
-        result = "Tidak ditemukan di data.csv"
-        url = None
+        return JSONResponse(content={
+            "prediction": "Rumah tidak dikenal",
+            "confidence": confidence
+        })
 
-    os.remove(temp_path)
-    return JSONResponse(content={"prediction": result, "url": url})
-
-# ==== STEP 4: Jalankan Server ====
+# ===== STEP 4: Jalankan Server FastAPI di Port 8000 =====
 if __name__ == "__main__":
     uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True)
